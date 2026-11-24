@@ -1,0 +1,235 @@
+import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { Pool } from "pg";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { getMatchCandidates } from "../db/queries";
+import { CANDIDATE_RULES } from "./rules";
+import { runAutoMatching } from "./run";
+
+// Eligibility, amounts and the due date window are SQL: they are tested
+// against a real Postgres, in a database of their own, with small fixtures.
+
+const TEST_DATABASE = "matching_test";
+const connection = {
+  host: process.env.PGHOST ?? "localhost",
+  port: Number(process.env.PGPORT ?? 5432),
+  user: process.env.PGUSER ?? "postgres",
+  password: process.env.PGPASSWORD ?? "postgres",
+};
+const MIGRATIONS = fileURLToPath(new URL("../../migrations/", import.meta.url));
+
+const SIREN = "123456789";
+const COMPANY = "c0000000-0000-4000-8000-000000000001";
+const OTHER_COMPANY = "c0000000-0000-4000-8000-000000000002";
+const ACCOUNT = "ac000000-0000-4000-8000-000000000001";
+
+let db: Pool;
+
+beforeAll(async () => {
+  // runAutoMatching prints a summary: keep the test output readable.
+  vi.spyOn(console, "log").mockImplementation(() => {});
+
+  const admin = new Pool({ ...connection, database: "postgres" });
+  await admin.query(`drop database if exists ${TEST_DATABASE} with (force)`);
+  await admin.query(`create database ${TEST_DATABASE}`);
+  await admin.end();
+
+  db = new Pool({ ...connection, database: TEST_DATABASE });
+  for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort()) {
+    await db.query(readFileSync(MIGRATIONS + file, "utf8"));
+  }
+});
+
+afterAll(async () => {
+  await db.end();
+});
+
+beforeEach(async () => {
+  await db.query("truncate company, account, transaction, buying_invoice");
+  await db.query(
+    "insert into company (id, siren, name) values ($1, $2, 'Acme client'), ($3, '987654321', 'Other client')",
+    [COMPANY, SIREN, OTHER_COMPANY],
+  );
+  await db.query("insert into account (id, company_id) values ($1, $2)", [
+    ACCOUNT,
+    COMPANY,
+  ]);
+});
+
+async function insertTransaction(fields: Record<string, unknown> = {}) {
+  const t = {
+    id: randomUUID(),
+    amount: "-120.00",
+    label: "VIR ACME",
+    reference: null,
+    status: "Booked",
+    date: "2026-06-10",
+    matched_invoice_id: null,
+    deleted_at: null,
+    ...fields,
+  };
+  await db.query(
+    `insert into transaction
+       (id, account_id, remote_id, amount, label, reference, status, date, matched_invoice_id, deleted_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [t.id, ACCOUNT, `BNK-${t.id}`, t.amount, t.label, t.reference, t.status, t.date, t.matched_invoice_id, t.deleted_at],
+  );
+  return t.id;
+}
+
+async function insertInvoice(fields: Record<string, unknown> = {}) {
+  const i = {
+    id: randomUUID(),
+    company_id: COMPANY,
+    supplier_name: "Acme",
+    invoice_number: null,
+    tax_free_total: "100.00",
+    vat_amount: "20.00",
+    due_date: "2026-06-10",
+    invoice_status: "ToPay",
+    deleted_at: null,
+    ...fields,
+  };
+  await db.query(
+    `insert into buying_invoice
+       (id, company_id, supplier_name, invoice_number, tax_free_total, vat_amount, due_date, invoice_status, deleted_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [i.id, i.company_id, i.supplier_name, i.invoice_number, i.tax_free_total, i.vat_amount, i.due_date, i.invoice_status, i.deleted_at],
+  );
+  return i.id;
+}
+
+// The candidate invoices of each eligible transaction, by transaction id.
+async function candidates(): Promise<Map<string, string[]>> {
+  const rows = await getMatchCandidates(db, COMPANY, CANDIDATE_RULES);
+  return new Map(
+    rows.map(({ transaction, candidates }) => [
+      transaction.id,
+      candidates.map((invoice) => invoice.id).sort(),
+    ]),
+  );
+}
+
+async function matchedInvoiceOf(transactionId: string) {
+  const { rows } = await db.query(
+    "select matched_invoice_id from transaction where id = $1",
+    [transactionId],
+  );
+  return rows[0].matched_invoice_id;
+}
+
+describe("candidate selection (SQL)", () => {
+  it("keeps due dates from 3 days before to 30 days after the payment", async () => {
+    const payment = await insertTransaction({ date: "2026-06-10" });
+    const threeDaysBefore = await insertInvoice({ due_date: "2026-06-07" });
+    await insertInvoice({ due_date: "2026-06-06" });
+    const thirtyDaysAfter = await insertInvoice({ due_date: "2026-07-10" });
+    await insertInvoice({ due_date: "2026-07-11" });
+
+    expect((await candidates()).get(payment)).toEqual(
+      [threeDaysBefore, thirtyDaysAfter].sort(),
+    );
+  });
+
+  it("counts calendar days across February of a leap year", async () => {
+    const payment = await insertTransaction({ date: "2028-02-01" });
+    const dueAfter30Days = await insertInvoice({ due_date: "2028-03-02" });
+    await insertInvoice({ due_date: "2028-03-03" });
+
+    expect((await candidates()).get(payment)).toEqual([dueAfter30Days]);
+  });
+
+  it("compares amounts exactly", async () => {
+    const payment = await insertTransaction({ amount: "-615.40" });
+    const invoice = await insertInvoice({
+      tax_free_total: "512.83",
+      vat_amount: "102.57",
+    });
+    await insertInvoice({ tax_free_total: "512.83", vat_amount: "102.58" });
+
+    expect((await candidates()).get(payment)).toEqual([invoice]);
+  });
+
+  it("ignores invoices without a due date", async () => {
+    const payment = await insertTransaction();
+    await insertInvoice({ due_date: null });
+
+    expect((await candidates()).get(payment)).toEqual([]);
+  });
+
+  it("only considers booked, live, unmatched outgoing transactions", async () => {
+    const eligible = await insertTransaction();
+    const alreadyMatchedTo = await insertInvoice({ due_date: "2026-01-01" });
+    await insertTransaction({ amount: "120.00" });
+    await insertTransaction({ status: "Pending" });
+    await insertTransaction({ deleted_at: "2026-06-11 10:00:00" });
+    await insertTransaction({ matched_invoice_id: alreadyMatchedTo });
+
+    expect([...(await candidates()).keys()]).toEqual([eligible]);
+  });
+
+  it("only considers live, unmatched invoices of an eligible status from the same company", async () => {
+    const payment = await insertTransaction();
+    const toPay = await insertInvoice({ invoice_status: "ToPay" });
+    const pending = await insertInvoice({ invoice_status: "Pending" });
+    const paid = await insertInvoice({ invoice_status: "Paid" });
+    await insertInvoice({ invoice_status: "Cancelled" });
+    await insertInvoice({ deleted_at: "2026-06-01 10:00:00" });
+    await insertInvoice({ company_id: OTHER_COMPANY });
+    const taken = await insertInvoice();
+    await insertTransaction({ date: "2026-01-01", matched_invoice_id: taken });
+
+    expect((await candidates()).get(payment)).toEqual(
+      [toPay, pending, paid].sort(),
+    );
+  });
+});
+
+describe("runAutoMatching", () => {
+  it("writes the match, and a second run changes nothing", async () => {
+    const payment = await insertTransaction();
+    const invoice = await insertInvoice();
+
+    await runAutoMatching(db, SIREN);
+    expect(await matchedInvoiceOf(payment)).toBe(invoice);
+
+    const before = await db.query("select * from transaction order by id");
+    await runAutoMatching(db, SIREN);
+    const after = await db.query("select * from transaction order by id");
+    expect(after.rows).toEqual(before.rows);
+  });
+
+  it("never overwrites an existing match", async () => {
+    const chosenByHand = await insertInvoice({ due_date: "2026-01-01" });
+    const payment = await insertTransaction({ matched_invoice_id: chosenByHand });
+    await insertInvoice();
+
+    await runAutoMatching(db, SIREN);
+    expect(await matchedInvoiceOf(payment)).toBe(chosenByHand);
+  });
+
+  it("leaves a duplicated bank import unmatched", async () => {
+    const imported = await insertTransaction();
+    const importedTwice = await insertTransaction();
+    await insertInvoice();
+
+    await runAutoMatching(db, SIREN);
+    expect(await matchedInvoiceOf(imported)).toBeNull();
+    expect(await matchedInvoiceOf(importedTwice)).toBeNull();
+  });
+
+  it("fails clearly for an unknown SIREN", async () => {
+    await expect(runAutoMatching(db, "000000000")).rejects.toThrow(
+      "No company with SIREN 000000000",
+    );
+  });
+});
