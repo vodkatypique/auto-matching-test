@@ -15,7 +15,7 @@ export type CompanyRow = z.infer<typeof CompanyRow>;
 // null when the transaction has no candidate.
 export const CandidateRow = z.object({
   transaction_id: z.string(),
-  label: z.string(),
+  label: z.nullable(z.string()),
   reference: z.nullable(z.string()),
   invoice_id: z.nullable(z.string()),
   supplier_name: z.nullable(z.string()),

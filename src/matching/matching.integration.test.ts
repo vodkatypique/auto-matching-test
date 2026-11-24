@@ -309,6 +309,22 @@ describe("runAutoMatching", () => {
     expect(await matchedInvoiceOf(payment)).toBeNull();
   });
 
+  it("leaves a transaction without label unmatched, without failing the run", async () => {
+    const withoutLabel = await insertTransaction({ label: null });
+    await insertInvoice();
+    const payment = await insertTransaction({ amount: "-50.00", label: "VIR BETA" });
+    const invoice = await insertInvoice({
+      supplier_name: "Beta",
+      tax_free_total: "40.00",
+      vat_amount: "10.00",
+    });
+
+    const summary = await runAutoMatching(db, SIREN);
+    expect(summary.decisions).toMatchObject({ matched: 1, no_candidate: 1 });
+    expect(await matchedInvoiceOf(payment)).toBe(invoice);
+    expect(await matchedInvoiceOf(withoutLabel)).toBeNull();
+  });
+
   it("refuses, in the database, one invoice for two live transactions", async () => {
     const invoice = await insertInvoice();
     await insertTransaction({ matched_invoice_id: invoice });

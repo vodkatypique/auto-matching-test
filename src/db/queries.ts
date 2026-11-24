@@ -85,7 +85,9 @@ export async function getMatchCandidates(
       entry = {
         transaction: {
           id: row.transaction_id,
-          label: row.label,
+          // Without a label, nothing can designate an invoice: the
+          // transaction just stays unmatched, instead of failing the run.
+          label: row.label ?? "",
           reference: row.reference,
         },
         candidates: [],
