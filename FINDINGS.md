@@ -1,165 +1,166 @@
-# FINDINGS : le job d'auto-matching
+# FINDINGS: the auto-matching job
 
-> Brouillon en français, classé du plus grave au moins grave en production.
+## Summary
 
-## Résumé
+The job does not follow the principle stated in the README: when no candidate is convincing, the transaction must stay unmatched. The code matches as soon as an invoice has the right amount within the date window. It does not check that the rows are allowed to be matched, and above all it guesses when several invoices fit.
 
-Le job ne respecte pas le principe posé par le README : quand aucun candidat n'est convaincant, la transaction doit rester non rapprochée. Le code rapproche dès qu'une facture a le bon montant dans la fenêtre de dates. Il ne vérifie pas que les lignes ont le droit d'être rapprochées, et il surtout devine quand plusieurs factures conviennent.
+Two more defects come on top. The result depends on the time zone of the machine running the job. And each run rewrites the previous one, without leaving any trace.
 
-Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine (le code est en utc mais la base depend du fuseau du serveur). Et chaque exécution réécrit celle d'avant, sans laisser de trace.
-
-Classement : d'abord ce qui crée des écritures comptables fausses et invisibles, puis ce qui empêche de les corriger, puis ce qui rend le résultat non reproductible ou les pannes invisibles, puis les rapprochements manqués, et enfin le coût.
+Ranking: first what writes wrong accounting records that nobody notices, then what prevents fixing them, then what makes results irreproducible or failures invisible, then missed matches, and last the cost.
 
 ---
 
-## 1. Le job devine quand plusieurs factures conviennent
+## 1. The job guesses when several invoices fit
 
-**Problème.** Quand plusieurs factures ont le bon montant dans la fenêtre, le code les classe et prend la première. En cas d'égalité, c'est l'ordre dans lequel la base renvoie les lignes qui décide.
+**Problem.** When several invoices have the right amount within the window, the code ranks them and takes the first one. On a tie, the order in which the database returns the rows decides.
 
-**Conséquence.** Le README demande de laisser la transaction non rapprochée quand aucun candidat n'est convaincant, mais le job choisit quand même. Pour un abonnement, le paiement est imputé à l'échéance la plus proche, qui n'est pas forcément celle réellement payée, et la vraie facture reste ouverte. L'écriture a l'air plausible, donc personne ne la vérifiera.
-
----
-
-## 2. Rien ne filtre les lignes qui ont le droit d'être rapprochées
-
-**Problème.** Les deux requêtes prennent toutes les transactions et toutes les factures de la société, sans aucune condition. Le README parle des transactions sortantes non rapprochées. Le code prend aussi :
-- les encaissements : à cause de Math.abs, un virement reçu peut "payer" une facture fournisseur du même montant
-- les transactions supprimées
-- les transactions encore "Pending"
-- les transactions déjà rapprochées
-- les factures annulées
-- les factures supprimées
-
-**Conséquence.** une écriture fausse :
-- un encaissement client rapproché d'une facture fournisseur fausse les deux comptabilités
-- un rapprochement sur une facture annulée laisse ouverte la facture réellement payée.
+**Consequence.** The README asks to leave the transaction unmatched when no candidate is convincing, but the job picks one anyway. For a subscription, the payment goes to the closest due date, which is not necessarily the one actually paid, and the real invoice stays open. The record looks plausible, so nobody will check it.
 
 ---
 
-## 3. Une même facture rapprochée plusieurs fois
+## 2. Nothing filters which rows may be matched
 
-**Problème.** Les factures déjà rapprochées ne sont pas exclues des candidats. Chaque transaction est traitée indépendamment, et rien en base n'empêche deux transactions de pointer vers la même facture.
+**Problem.** Both queries take every transaction and every invoice of the company, with no condition. The README talks about unmatched outgoing transactions. The code also takes:
+- incoming payments: because of Math.abs, a transfer received can "pay" a supplier invoice of the same amount
+- deleted transactions
+- transactions still "Pending"
+- transactions already matched
+- cancelled invoices
+- deleted invoices
 
-**Conséquence.**
-- Une facture apparaît payée deux ou trois fois.
-- Quand un fournisseur est réellement payé deux fois de suite, le second paiement règle en fait une autre facture. 
-- Un débit en double, que le client devrait probablement contester a sa banque, apparaît comme réglé.
-
----
-
-## 4. Montant + date ne suffisent pas à prouver un paiement
-
-**Problème.** Le README demande un candidat "convaincant". Le code se contente du montant et de la fenêtre de dates. Le libellé bancaire (nom du fournisseur, numéro de facture) ne sert qu'à départager plusieurs candidats, via un malus dans le code. Il ne sert jamais à exiger une preuve ni à écarter un candidat.
-
-**Conséquence.** Des paiements sont imputés au mauvais fournisseur, alors que le libellé dit clairement qui a été payé. La facture choisie apparaît réglée et la vraie reste ouverte. Or les montants se répètent beaucoup : 35017 factures pour seulement 25702 totaux différents, et 153 factures Orange à 59,99€. Avoir le même montant ne prouve rien.
+**Consequence.** A wrong record:
+- a customer payment matched to a supplier invoice makes both ledgers wrong
+- a match on a cancelled invoice leaves the invoice that was actually paid open.
 
 ---
 
-## 5. La lecture du libellé est fausse
+## 3. The same invoice matched several times
 
-**Problème.** Le bonus de libellé teste label.includes(nom) après un simple trim().toLowerCase() :
-- une chaîne vide est contenue dans n'importe quel texte : une facture sans numéro reçoit donc le bonus pour toutes les transactions
-- la recherche porte sur une sous-chaîne et non sur un mot : "sfr" est trouvé dans "sfri"
-- un fournisseur NULL fait planter le job
-- citer le numéro de facture donne le même bonus que citer le fournisseur, alors que le numéro est plus précis, c'est pas très logique ;
-- la colonne "reference", qui sert à ça a priori, n'est jamais lue ;
-- les raisons sociales apparaissent rarement telles quelles dans un libellé ("Slack Technologies ", ou "Total Energies" face à "TOTALENERGIES") : la bonne facture ne reçoit pas le bonus.
+**Problem.** Invoices already matched are not excluded from the candidates. Each transaction is handled on its own, and nothing in the database prevents two transactions from pointing to the same invoice.
 
----
-
-## 6. Chaque exécution réécrit tout, sans laisser de trace
-
-**Problème.** Le job ne filtre pas les transactions déjà rapprochées et écrit sans condition. La base ne garde rien qui indique qui a rapproché (le job ou un utilisateur), ni quand, ni lors de quelle exécution. Et quand le job ne trouve plus de candidat, il ne touche à rien : un rapprochement devenu faux ou ambigu n'est jamais retiré.
-
-**Conséquence.**
-- Un rapprochement fait à la main par un utilisateur peut être écrasé.
-- Un rapprochement que l'utilisateur a défait est recréé à l'exécution suivante.
-- Après une mauvaise exécution (bug, mauvais déploiement), on ne peut pas lister ce qu'elle a écrit, donc on ne peut pas l'annuler sans toucher aux rapprochements manuels. D'après le README, ce code est déjà en production : rapprochements automatiques et manuels y sont donc déjà mélangés.
+**Consequence.**
+- An invoice looks paid two or three times.
+- When a supplier really is paid twice in a row, the second payment actually settles another invoice.
+- A duplicate debit, which the customer should probably dispute with their bank, looks settled.
 
 ---
 
-## 7. Le résultat dépend du fuseau horaire de la machine
+## 4. Amount and date are not enough to prove a payment
 
-**Problème.** node-pg convertit une colonne `date` en objet `Date` à minuit, heure locale. `due_date`, lui, est un texte (`'YYYY-MM-DD'`) que `new Date()` interprète comme minuit UTC. `dayDiff` soustrait les deux.
+**Problem.** The README asks for a "convincing" candidate. The code settles for the amount and the date window. The bank label (supplier name, invoice number) is only used to break ties between candidates, through a score adjustment in the code. It is never used to require evidence or to rule a candidate out.
 
-**Conséquence.** Sur une machine à l'heure de Paris, toutes les différences sont décalées d'un jour. Le même job, sur les mêmes données, produit donc des rapprochements différents selon le serveur.
-
----
-
-## 8. Les échecs passent inaperçus
-
-**Problème.** Chaque transaction est traitée dans un try/catch qui affiche "skip" et l'erreur, sans identifiant, puis passe à la suivante et le process sort avec le code 0 dès lors que la société a été trouvée.
-
-Exemple concret, visible dès le premier lancement : chaque exécution affiche `skip TypeError: Cannot read properties of null (reading 'trim')`.
-- La transaction `e0000013-...-001` (-333,33€, "PRLV SEPA ASSURANCE") n'a qu'une facture candidate : 277,78+55,55, échéance le 18/01/2026.
-- Cette facture n'a pas de fournisseur (`supplier_name` est NULL), donc `normalizeLabel(null)` plante.
-- Le `catch` affiche "skip" suivi de l'erreur, puis le job continue.
-
-**Conséquence.**
-- Une donnée incomplète fait perdre un rapprochement qui était le seul possible. La même facture bloquerait toute autre transaction dont elle serait candidate.
-- L'erreur ne dit pas quelle transaction est concernée, j'ai du ajouter du code pour savoir d'ou ca venait, et le job se termine normalement. Personne ne saura qu'elle a été sautée.
-- Si la base redémarre ou devient injoignable pendant l'exécution, toutes les transactions restantes sont sautées en quelques millisecondes. Le job affiche "Matched N of 1200", se termine normalement, et le planificateur enregistre un succès.
-- Une requête bloquée peut aussi faire durer une exécution indéfiniment, jusqu'à chevaucher la suivante.
+**Consequence.** Payments are booked against the wrong supplier, even when the label clearly says who was paid. The chosen invoice looks settled and the real one stays open. And amounts repeat a lot: 35,017 invoices for only 25,702 distinct totals, and 153 Orange invoices of €59.99. Having the same amount proves nothing.
 
 ---
 
-## 9. Les montants en flottants font rater des rapprochements
+## 5. The label is read the wrong way
 
-**Problème.** Les montants sont stockés en float et on fait des comparaison en JS avec ===, donc on a des soucis de representations classiques qui font que le resultat ne tombe pas exact très souvent.
+**Problem.** The label bonus tests label.includes(name) after a mere trim().toLowerCase():
+- an empty string is contained in any text: an invoice without a number gets the bonus for every transaction
+- it searches for a substring, not a word: "sfr" is found in "sfri"
+- a NULL supplier makes the transaction fail (see 8)
+- citing the invoice number gives the same bonus as citing the supplier, although the number is far more precise, which makes little sense
+- the "reference" column, which seems meant for this, is never read
+- legal names rarely appear as is in a label ("Slack Technologies", or "Total Energies" against "TOTALENERGIES"): the right invoice does not get the bonus.
 
-**Conséquence.** Des rapprochements évidents ne sont jamais faits, sans aucune erreur.
+**Consequence.** The bonus sometimes favours the wrong invoice: on the seed, the "VIR TRANSFERT SFRI SARL" payment goes to SFR, and "PRLV SEPA SAGE" goes to Qonto, whose invoice number is empty. And when the label writes the supplier differently, the right invoice never gets the bonus.
+
+---
+
+## 6. Every run rewrites everything, without leaving a trace
+
+**Problem.** The job does not filter out transactions already matched, and writes unconditionally. Nothing in the database records who made a match (the job or a user), when, or in which run. And when the job no longer finds a candidate, it leaves the row alone: a match that became wrong or ambiguous is never removed.
+
+**Consequence.**
+- A match made by hand by a user can be overwritten.
+- A match the user undid is recreated by the next run.
+- After a bad run (a bug, a bad deployment), what it wrote cannot be listed, so it cannot be reverted without touching manual matches. According to the README, this code is already in production: automatic and manual matches are therefore already mixed up.
+
+---
+
+## 7. The result depends on the time zone of the machine
+
+**Problem.** node-pg turns a `date` column into a `Date` object at local midnight. `due_date`, on the other hand, is text (`'YYYY-MM-DD'`), which `new Date()` reads as UTC midnight. `dayDiff` subtracts the two.
+
+**Consequence.** On a machine set to Paris time, every difference is shifted by one day. The same job, on the same data, therefore produces different matches depending on the server.
+
+---
+
+## 8. Failures go unnoticed
+
+**Problem.** Each transaction is handled inside a try/catch that prints "skip" and the error, without any id, then moves on to the next one, and the process exits with code 0 as long as the company was found.
+
+A concrete example, visible from the very first run: every run prints `skip TypeError: Cannot read properties of null (reading 'trim')`.
+- Transaction `e0000013-...-001` (-€333.33, "PRLV SEPA ASSURANCE") has a single candidate invoice: 277.78 + 55.55, due 2026-01-18.
+- That invoice has no supplier (`supplier_name` is NULL), so `normalizeLabel(null)` crashes.
+- The `catch` prints "skip" followed by the error, and the job carries on.
+
+**Consequence.**
+- Incomplete data loses a match that was the only possible one. The same invoice would block any other transaction it is a candidate for.
+- The error does not say which transaction is involved (I had to add code to find out where it came from), and the job ends normally. Nobody will know it was skipped.
+- If the database restarts or becomes unreachable during the run, all remaining transactions are skipped within milliseconds. The job prints "Matched N of 1200", ends normally, and the scheduler records a success.
+- A blocked query can also make a run last forever, until it overlaps the next one.
+
+---
+
+## 9. Floating-point amounts make matches fail
+
+**Problem.** Amounts are stored as floats and compared in JS with ===, so the classic representation issues mean the result is very often not exact.
+
+**Consequence.** Obvious matches are never made, without any error.
 
 ---
 
 ## 10. Performance
 
-**Problème.** getCandidates est appelée à chaque tour de boucle. Toutes les factures de la société sont rechargées pour chaque transaction, sans filtre ni index.
+**Problem.** getCandidates is called on every loop iteration. All the company's invoices are reloaded for each transaction, with no filter and no index.
 
-**Conséquence.** On transfère 1200 × 35017 = 42 millions de lignes en 1708 requêtes, soit environ 50 secondes pour une société de taille modeste. L'essentiel du temps est passé dans Node à décoder des lignes qui sont jetées. Le coût grandit avec l'historique de factures de chaque client, et chaque requête relit toute la table des factures.
+**Consequence.** 1,200 × 35,017 = 42 million rows are transferred in 1,708 queries, about 50 seconds for a modest-sized company. Most of that time is spent in Node decoding rows that are thrown away. The cost grows with each customer's invoice history, and every query reads the whole invoice table again.
 
 ---
 
-## Autres points
+## Other points
 
-- **Entrée du programme écrite en dur et injectée dans le SQL.** Le SIREN est écrit en dur dans main, puis injecté tel quel dans la requête, comme toutes les autres valeurs. C'est pas exploitable aujourd'hui, mais ça le devient dès que le SIREN viendra d'une entrée utilisateur (API, ligne de commande, file de messages). Le job tourne en plus avec le superutilisateur Postgres.
-- **Le SIREN n'est pas unique en base.** `rows: [company]` prend la première ligne venue s'il existe un doublon.
-- **Une transaction sur un compte inexistant disparaît sans bruit.** `e0000011` est rattachée au compte `ac...099`, qui n'existe pas. La jointure l'écarte sans rien signaler (pas de clé étrangère).
-- **Les factures sans échéance sont exclues par accident.** Elles sont 1 051 : `new Date(null)` vaut le 1er janvier 1970, toujours hors fenêtre. Le résultat est le bon, mais un peu par hasard.
-- **`db:reset` est un peu dangereux.** Il supprime le schéma de la base désignée par les variables `PG*` (si on a un autre projet ou des var d'env sur le pc, il faut faire attention)
+- **The program input is hard-coded and injected into the SQL.** The SIREN is hard-coded in main, then injected as is into the query, like every other value. This is not exploitable today, but it becomes so as soon as the SIREN comes from user input (API, command line, message queue). On top of that, the job runs as the Postgres superuser.
+- **The SIREN is not unique in the database.** `rows: [company]` takes whichever row comes first if there is a duplicate.
+- **A transaction on a non-existent account disappears silently.** `e0000011` belongs to account `ac...099`, which does not exist. The join drops it without reporting anything (there is no foreign key).
+- **A duplicated bank import is matched twice.** `e0000012-...-001` and `-002` have the same `remote_id` on the same account, and both are matched to the same rent invoice. Nothing makes `(account_id, remote_id)` unique.
+- **Invoices without a due date are excluded by accident.** There are 1,051 of them: `new Date(null)` is January 1st, 1970, always outside the window. The result is right, but somewhat by luck.
+- **`db:reset` is a bit dangerous.** It drops the schema of whatever database the `PG*` variables point to (if another project or environment variables are set on the machine, be careful).
 
-## Qualité du code
+## Code quality
 
-- **Typage des lignes.** `TransactionRow` et `InvoiceRow` ne sont que des déclarations posé sur un `select *`. Elles déclarent `string` pour des colonnes qui peuvent être NULL (`supplier_name`, `due_date`), et omettent les colonnes dont la règle a besoin (`status`, `deleted_at`, `matched_invoice_id`, `invoice_status`). TypeScript détecte donc pas certains plantage de type.
-- **Pas de dry-run.** aucun moyen de voir ce qu'une modification de la règle écrirait avant qu'elle n'écrive dans la comptabilité des clients.
-- **La logique de décision est mêlée aux accès à la base.** `findMatch` et `scoreCandidate` ne sont pas exportées, et le pool de connexions est global. On ne peut pas tester la décision sans base.
-- **Les tests ne vérifient rien de décisif, et rien ne vérifie les types.** Les tests couvrent deux petites fonctions utilitaires.
+- **Row types.** `TransactionRow` and `InvoiceRow` are mere declarations laid over a `select *`. They declare `string` for columns that can be NULL (`supplier_name`, `due_date`), and leave out the columns the rule needs (`status`, `deleted_at`, `matched_invoice_id`, `invoice_status`). So TypeScript cannot catch some type crashes.
+- **No dry run.** There is no way to see what a change to the rule would write before it writes into customers' accounting.
+- **The decision logic is mixed with database access.** `findMatch` and `scoreCandidate` are not exported, and the connection pool is global. The decision cannot be tested without a database.
+- **The tests check nothing that matters, and nothing checks the types.** The tests cover two small helper functions.
 
-## Trouvé pendant la refonte
+## Found during the rework
 
-### Les gros montants ont peut-être déjà perdu leurs centimes
+### Large amounts may already have lost their cents
 
-**Problème.** Pour passer les montants en `numeric`, il faut convertir les valeurs `real` existantes. Deux pièges :
-- la conversion directe `real::numeric` ne garde que 6 chiffres significatifs : 12 345,67 devient 12 345,70 ;
-- plus grave, `real` ne garde qu'environ 7 chiffres significatifs dès l'enregistrement. Au-delà de 131 072 €, deux montants qui diffèrent d'un centime peuvent être stockés sous la même valeur.
+**Problem.** Moving the amounts to `numeric` means converting the existing `real` values. Two traps:
+- a direct `real::numeric` cast keeps only 6 significant digits: 12,345.67 becomes 12,345.70;
+- worse, `real` only keeps about 7 significant digits from the moment a value is stored. Above €131,072, two amounts one cent apart can be stored as the same value.
 
-**Conséquence.** Si la base de production contient des montants au-delà de ce seuil, certains ont pu être enregistrés faux dès l'origine, sans aucune erreur. L'écart grandit avec le montant : au plus 1 centime jusqu'à 262 144 €, jusqu'à 3 centimes vers 1 M€, jusqu'à 50 centimes vers 10 M€. Aucune migration ne peut retrouver la valeur d'origine à partir de la base, et une comparaison exacte ne rapprochera jamais un montant faux d'un centime de sa facture.
+**Consequence.** If the production database holds amounts above that threshold, some may have been stored wrong from the start, without any error. The gap grows with the amount: at most 1 cent up to €262,144, up to 3 cents around €1M, up to 50 cents around €10M. No migration can recover the original value from the database, and an exact comparison will never match an amount that is one cent off with its invoice.
 
-**Correction.**
-- La migration passe par `float8` puis arrondit au centime : `round(col::float8::numeric, 2)`. C'est exact tant que le `real` n'avait pas déjà perdu le centime.
-- Avant de migrer en production, compter les montants concernés (`abs(amount) >= 131072`, et de même pour les factures). S'il y en a, les corriger depuis la source : réimport du flux bancaire grâce à `remote_id`, nouvelle extraction de la facture d'origine.
+**Fix.**
+- The migration goes through `float8` and then rounds to the cent: `round(col::float8::numeric, 2)`. This is exact as long as the `real` had not already lost the cent.
+- Before migrating production, count the affected amounts (`abs(amount) >= 131072`, and the same for invoices). If there are any, fix them from the source: re-import the bank feed using `remote_id`, extract the original invoice again.
 
-### Exiger une preuve fait aussi manquer des rapprochements justes
+### Requiring evidence also loses correct matches
 
-**Constat.** La refonte n'accepte une facture que si le libellé bancaire la désigne : par son numéro, ou par le nom du fournisseur, dont tous les mots distinctifs doivent apparaître en mots entiers. Sur le seed, les rapprochements passent de 551 à 461. Les 92 perdus se répartissent ainsi :
-- 48 dont le libellé ne contient aucun mot du fournisseur de la facture. C'étaient de mauvais fournisseurs : "VIR TRANSGOURMET" → Uber, "CB AMAZON BUSINESS EU" → Microsoft. Les perdre est voulu.
-- 44 où le fournisseur est probablement le bon, mais où le libellé n'écrit qu'une partie de son nom : "CB SLACK T0123" → Slack Technologies, "CB METRO PARIS NANTERRE" → Metro Cash & Carry, "VIR SEPA LEFEBVRE AVOCATS" → Cabinet Lefebvre Avocats, "CB SNCF INTERNET" → SNCF Voyageurs. Ceux-là sont des rapprochements justes manqués.
+**Finding.** The rework only accepts an invoice if the bank label designates it: by its number, or by the supplier's name, all of whose distinctive words must appear as whole words. On the seed, at that step (before ambiguous cases were left unmatched), matches went from 551 to 461: 92 earlier matches disappeared, 2 of which were replaced by the right invoice (SFRI SARL instead of SFR, Sage instead of Qonto). The 92 break down as follows:
+- 48 whose label contains no word of the invoice's supplier. 30 of them were wrong suppliers: "VIR TRANSGOURMET" → Uber, "CB AMAZON BUSINESS EU" → Microsoft. Losing them is intended. The other 18 are "PRLV SEPA OVH SAS" → OVHcloud: the same supplier under another name, so correct matches that are missed.
+- 44 where the supplier is probably right, but the label only writes part of its name: "CB SLACK T0123" → Slack Technologies, "CB METRO PARIS NANTERRE" → Metro Cash & Carry, "VIR SEPA LEFEBVRE AVOCATS" → Cabinet Lefebvre Avocats, "CB SNCF INTERNET" → SNCF Voyageurs. These are correct matches that are missed.
 
-**Pourquoi je garde la règle stricte.** Le README dit : un faux rapprochement est pire qu'une absence de rapprochement. Une transaction non rapprochée reste visible, et le client la traite à la main. Un faux rapprochement passe inaperçu. Or une règle plus souple, où un seul mot du nom suffirait, désigne à tort un autre fournisseur dans une vingtaine de libellés du seed : "PRO" trouve Free Pro dans "CB LEROY MERLIN PRO", "DUPONT" trouve Imprimerie Dupont dans l'encaissement "VIR RECU CLIENT DUPONT", "CABINET" confond trois cabinets différents.
+**Why I keep the strict rule.** The README says it: an incorrect pairing is worse than no pairing at all. An unmatched transaction stays visible, and the customer handles it by hand. A wrong match goes unnoticed. And a looser rule, where a single word of the name would be enough, wrongly designates another supplier in about twenty labels of the seed: "PRO" finds Free Pro in "CB LEROY MERLIN PRO", "DUPONT" finds Imprimerie Dupont in the incoming payment "VIR RECU CLIENT DUPONT", "CABINET" mixes up three different firms.
 
-**Pour récupérer ces cas sans perdre en précision.** Il faudrait une table d'alias par société ("SLACK" → Slack Technologies), apprise à partir des rapprochements que l'utilisateur fait ou confirme à la main. Elle est déterministe et explicable, et l'IA pourrait proposer des alias qu'un humain valide.
+**How to recover these cases without losing precision.** A per-company alias table ("SLACK" → Slack Technologies, "OVH SAS" → OVHcloud), learned from the matches users make or confirm by hand. It is deterministic and explainable, and AI could suggest aliases for a human to validate.
 
-### Sans statistiques, la requête des candidats prend des minutes au lieu de millisecondes
+### Without statistics, the candidate query takes minutes instead of milliseconds
 
-**Constat.** Une fois la sélection des candidats passée dans une seule requête SQL (jointure entre transactions et factures éligibles), le premier lancement juste après `db:reset` ne terminait pas : plus de 5 minutes. Juste après un chargement massif, les tables n'ont pas encore de statistiques. Postgres croit qu'elles n'ont qu'une ligne, choisit des boucles imbriquées, et recalcule l'anti-jointure ("facture déjà prise") pour chaque transaction. Après un `ANALYZE`, il choisit des jointures par hachage, et la même requête prend 35 ms.
+**Finding.** Once candidate selection moved to a single SQL query (a join between eligible transactions and invoices), the first run right after `db:reset` did not finish: more than 5 minutes. Right after a bulk load, the tables have no statistics yet. Postgres assumes they hold a single row, picks nested loops, and recomputes the anti-join ("invoice already taken") for every transaction. After an `ANALYZE`, it picks merge and hash joins, and the same query takes 35 ms.
 
-**Ce que j'ai fait.** `db:reset` lance `ANALYZE` après le seed. En production, les statistiques sont tenues à jour automatiquement, mais un gros import juste avant le job pourrait reproduire le problème. Le délai d'expiration de 30 s par requête le transforme alors en erreur visible (exécution annulée, code de sortie 1) au lieu d'un job bloqué. La vraie prévention serait de lancer `ANALYZE` à la fin des imports massifs.
+**What I did.** `db:reset` runs `ANALYZE` after the seed. In production, statistics are kept up to date automatically, but a large import right before the job could bring the problem back. The 30-second statement timeout then turns it into a visible error (run rolled back, exit code 1) instead of a stuck job. The real prevention would be to run `ANALYZE` at the end of bulk imports.
