@@ -1,30 +1,20 @@
 import { db } from "../db/pool";
 import {
   getCompanyBySiren,
-  getEligibleInvoices,
-  getEligibleTransactions,
+  getMatchCandidates,
   setMatchedInvoice,
 } from "../db/queries";
 import { decideMatches } from "./decide";
-import {
-  ELIGIBLE_INVOICE_STATUSES,
-  ELIGIBLE_TRANSACTION_STATUS,
-} from "./rules";
+import { CANDIDATE_RULES } from "./rules";
 
 export async function runAutoMatching(companySiren: string): Promise<void> {
   const company = await getCompanyBySiren(db, companySiren);
-  const transactions = await getEligibleTransactions(
+  const transactions = await getMatchCandidates(
     db,
     company.id,
-    ELIGIBLE_TRANSACTION_STATUS,
+    CANDIDATE_RULES,
   );
-  const invoices = await getEligibleInvoices(
-    db,
-    company.id,
-    ELIGIBLE_INVOICE_STATUSES,
-  );
-
-  const decisions = decideMatches(transactions, invoices);
+  const decisions = decideMatches(transactions);
 
   let matched = 0;
 

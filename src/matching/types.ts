@@ -2,26 +2,33 @@
 export type TransactionStatus = "Booked" | "Pending";
 export type InvoiceStatus = "Pending" | "ToPay" | "Paid" | "Cancelled";
 
+// The rules that select candidate invoices in SQL: eligibility, then an exact
+// amount and a due date within the window.
+export type CandidateRules = {
+  transactionStatus: TransactionStatus;
+  invoiceStatuses: InvoiceStatus[];
+  maxDaysDueBeforePayment: number;
+  maxDaysDueAfterPayment: number;
+};
+
 export type TransactionRow = {
   id: string;
-  amount_cents: number;
   label: string;
   reference: string | null;
-  date: string;
 };
 
 export type InvoiceRow = {
   id: string;
   supplier_name: string | null;
   invoice_number: string | null;
-  tax_free_total_cents: number;
-  vat_amount_cents: number;
-  due_date: string | null;
 };
 
-// An invoice whose due date is known. Used as a type predicate when filtering
-// out invoices without one, so TypeScript knows due_date is a string after.
-export type InvoiceWithDueDate = InvoiceRow & { due_date: string };
+// An eligible transaction and the invoices that pass the SQL rules for it
+// (possibly none).
+export type TransactionCandidates = {
+  transaction: TransactionRow;
+  candidates: InvoiceRow[];
+};
 
 // What the job decided for one transaction, and why.
 // - no_candidate: no invoice passes every rule;

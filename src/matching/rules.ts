@@ -1,4 +1,13 @@
-import type { InvoiceStatus, TransactionStatus } from "./types";
+import type {
+  CandidateRules,
+  InvoiceStatus,
+  TransactionStatus,
+} from "./types";
+
+// README rule: the due date falls between 3 days before and 30 days after
+// the transaction date.
+export const MAX_DAYS_DUE_BEFORE_PAYMENT = 3;
+export const MAX_DAYS_DUE_AFTER_PAYMENT = 30;
 
 // Invoice statuses a payment can be matched to.
 // Cancelled is never eligible: a cancelled invoice will never be paid.
@@ -18,3 +27,10 @@ export const ELIGIBLE_INVOICE_STATUSES = [
 
 // Only booked bank transactions: a pending one can still change or disappear.
 export const ELIGIBLE_TRANSACTION_STATUS = "Booked" satisfies TransactionStatus;
+
+export const CANDIDATE_RULES: CandidateRules = {
+  transactionStatus: ELIGIBLE_TRANSACTION_STATUS,
+  invoiceStatuses: ELIGIBLE_INVOICE_STATUSES,
+  maxDaysDueBeforePayment: MAX_DAYS_DUE_BEFORE_PAYMENT,
+  maxDaysDueAfterPayment: MAX_DAYS_DUE_AFTER_PAYMENT,
+};
