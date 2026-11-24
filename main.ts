@@ -1,4 +1,4 @@
-import { db } from './src/db';
+import { db } from './src/db/pool';
 import { runAutoMatching } from './src/matcher';
 
 async function main() {

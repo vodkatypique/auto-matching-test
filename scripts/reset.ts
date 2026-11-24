@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { db } from '../src/db';
+import { db } from '../src/db/pool';
 
 async function runSqlFiles(directory: string) {
   for (const file of fs.readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()) {
