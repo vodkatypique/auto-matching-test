@@ -46,10 +46,12 @@ export function findMatch(
     .filter(
       (invoice): invoice is InvoiceWithDueDate => invoice.due_date !== null,
     )
+    // A payment is a debit (negative amount) of the invoice total. Without
+    // Math.abs, a credit can no longer match a supplier invoice.
     .filter(
       (invoice) =>
         invoice.tax_free_total_cents + invoice.vat_amount_cents ===
-        Math.abs(transaction.amount_cents),
+        -transaction.amount_cents,
     )
     .filter((invoice) => {
       const daysFromPaymentToDue = dayDiff(invoice.due_date, transaction.date);

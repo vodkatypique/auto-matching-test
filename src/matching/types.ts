@@ -1,3 +1,7 @@
+// The statuses found in the data. The database stores them as free text.
+export type TransactionStatus = "Booked" | "Pending";
+export type InvoiceStatus = "Pending" | "ToPay" | "Paid" | "Cancelled";
+
 export type TransactionRow = {
   id: string;
   amount_cents: number;

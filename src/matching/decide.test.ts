@@ -54,6 +54,11 @@ describe("matcher", () => {
     expect(findMatch(paymentOnJune10, [invoiceDue(null)])).toBeNull();
   });
 
+  it("never matches an incoming payment, even of the same amount", () => {
+    const credit = { ...paymentOnJune10, amount_cents: 12000 };
+    expect(findMatch(credit, [invoiceDue("2026-06-10")])).toBeNull();
+  });
+
   it("matches an invoice whose total is exact in cents but not in floats", () => {
     const invoice = {
       id: "f0000003",
