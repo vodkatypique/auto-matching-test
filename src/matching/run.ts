@@ -1,11 +1,11 @@
-import { db } from "./db/pool";
+import { db } from "../db/pool";
 import {
   getCompanyBySiren,
   getCompanyInvoices,
   getCompanyTransactions,
   setMatchedInvoice,
-} from "./db/queries";
-import { findMatch } from "./matching/decide";
+} from "../db/queries";
+import { findMatch } from "./decide";
 
 export async function runAutoMatching(companySiren: string): Promise<void> {
   const company = await getCompanyBySiren(db, companySiren);
