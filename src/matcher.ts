@@ -1,20 +1,5 @@
 import { db } from "./db/pool";
-
-type TransactionRow = {
-  id: string;
-  amount: number;
-  label: string;
-  date: Date;
-};
-
-type InvoiceRow = {
-  id: string;
-  supplier_name: string;
-  invoice_number: string;
-  tax_free_total: number;
-  vat_amount: number;
-  due_date: string;
-};
+import type { InvoiceRow, TransactionRow } from "./matching/types";
 
 export function normalizeLabel(value: string): string {
   return value.trim().toLowerCase();
