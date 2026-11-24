@@ -152,3 +152,13 @@ Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine
 **Correction.**
 - La migration passe par `float8` puis arrondit au centime : `round(col::float8::numeric, 2)`. C'est exact tant que le `real` n'avait pas déjà perdu le centime.
 - Avant de migrer en production, compter les montants concernés (`abs(amount) >= 131072`, et de même pour les factures). S'il y en a, les corriger depuis la source : réimport du flux bancaire grâce à `remote_id`, nouvelle extraction de la facture d'origine.
+
+### Exiger une preuve fait aussi manquer des rapprochements justes
+
+**Constat.** La refonte n'accepte une facture que si le libellé bancaire la désigne : par son numéro, ou par le nom du fournisseur, dont tous les mots distinctifs doivent apparaître en mots entiers. Sur le seed, les rapprochements passent de 551 à 461. Les 92 perdus se répartissent ainsi :
+- 48 dont le libellé ne contient aucun mot du fournisseur de la facture. C'étaient de mauvais fournisseurs : "VIR TRANSGOURMET" → Uber, "CB AMAZON BUSINESS EU" → Microsoft. Les perdre est voulu.
+- 44 où le fournisseur est probablement le bon, mais où le libellé n'écrit qu'une partie de son nom : "CB SLACK T0123" → Slack Technologies, "CB METRO PARIS NANTERRE" → Metro Cash & Carry, "VIR SEPA LEFEBVRE AVOCATS" → Cabinet Lefebvre Avocats, "CB SNCF INTERNET" → SNCF Voyageurs. Ceux-là sont des rapprochements justes manqués.
+
+**Pourquoi je garde la règle stricte.** Le README dit : un faux rapprochement est pire qu'une absence de rapprochement. Une transaction non rapprochée reste visible, et le client la traite à la main. Un faux rapprochement passe inaperçu. Or une règle plus souple, où un seul mot du nom suffirait, désigne à tort un autre fournisseur dans une vingtaine de libellés du seed : "PRO" trouve Free Pro dans "CB LEROY MERLIN PRO", "DUPONT" trouve Imprimerie Dupont dans l'encaissement "VIR RECU CLIENT DUPONT", "CABINET" confond trois cabinets différents.
+
+**Pour récupérer ces cas sans perdre en précision.** Il faudrait une table d'alias par société ("SLACK" → Slack Technologies), apprise à partir des rapprochements que l'utilisateur fait ou confirme à la main. Elle est déterministe et explicable, et l'IA pourrait proposer des alias qu'un humain valide.
