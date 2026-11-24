@@ -9,6 +9,9 @@ import { CANDIDATE_RULES } from "./rules";
 
 export async function runAutoMatching(companySiren: string): Promise<void> {
   const company = await getCompanyBySiren(db, companySiren);
+  if (company === undefined) {
+    throw new Error(`No company with SIREN ${companySiren}`);
+  }
   const transactions = await getMatchCandidates(
     db,
     company.id,

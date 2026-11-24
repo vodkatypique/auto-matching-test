@@ -1,16 +1,21 @@
 import type { Pool } from "pg";
+import * as z from "zod/mini";
 import type {
   CandidateRules,
   TransactionCandidates,
 } from "../matching/types";
+import { CandidateRow, CompanyRow } from "./rows";
 
 export type Db = Pick<Pool, "query">;
 
-export async function getCompanyBySiren(db: Db, siren: string) {
-  const {
-    rows: [company],
-  } = await db.query("select * from company where siren = $1", [siren]);
-  return company;
+export async function getCompanyBySiren(
+  db: Db,
+  siren: string,
+): Promise<CompanyRow | undefined> {
+  const { rows } = await db.query("select id from company where siren = $1", [
+    siren,
+  ]);
+  return z.array(CompanyRow).parse(rows)[0];
 }
 
 // Every eligible transaction of the company, with the invoices it could pay:
@@ -69,7 +74,7 @@ export async function getMatchCandidates(
   );
 
   const byTransaction = new Map<string, TransactionCandidates>();
-  for (const row of rows) {
+  for (const row of z.array(CandidateRow).parse(rows)) {
     let entry = byTransaction.get(row.transaction_id);
     if (entry === undefined) {
       entry = {
