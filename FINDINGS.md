@@ -164,3 +164,86 @@ A concrete example, visible from the very first run: every run prints `skip Type
 **Finding.** Once candidate selection moved to a single SQL query (a join between eligible transactions and invoices), the first run right after `db:reset` did not finish: more than 5 minutes. Right after a bulk load, the tables have no statistics yet. Postgres assumes they hold a single row, picks nested loops, and recomputes the anti-join ("invoice already taken") for every transaction. After an `ANALYZE`, it picks merge and hash joins, and the same query takes 35 ms.
 
 **What I did.** `db:reset` runs `ANALYZE` after the seed. In production, statistics are kept up to date automatically, but a large import right before the job could bring the problem back. The 30-second statement timeout then turns it into a visible error (run rolled back, exit code 1) instead of a stuck job. The real prevention would be to run `ANALYZE` at the end of bulk imports.
+
+---
+
+## Note
+
+### What the rework does
+
+The rework keeps the README's rule and makes it strict. A payment is matched to an invoice only when:
+- both rows are eligible: an outgoing, booked, live, unmatched transaction that no user has worked on, and a live invoice, not cancelled, not already matched, with a due date;
+- the invoice total equals the payment exactly, and its due date is between 3 days before and 30 days after the payment;
+- the bank label designates the invoice, by its number or by the supplier's name in whole words;
+- nothing competes with it. An invoice cited by its number wins over one only named by its supplier. Otherwise, several candidates make the transaction "ambiguous", and an invoice chosen by two transactions makes both "contested". Both cases are left unmatched.
+
+On the seed (company 900997767), 983 transactions are eligible: 322 are matched, 137 are ambiguous, 2 are contested (the duplicated import) and 522 have no candidate. None of the 322 contradicts its label, and no invoice is used twice. The result is the same in UTC and in Paris time, and a run takes 0.8 s instead of 50 s.
+
+How each finding is addressed:
+
+| Finding | In the rework |
+|---|---|
+| 1. Guessing | ambiguous cases are left unmatched (`decide.ts`) |
+| 2. No eligibility | filters in SQL (`getMatchCandidates`) |
+| 3. Same invoice twice | uniqueness within a run, guarded `UPDATE`, partial unique index |
+| 4, 5. Weak evidence, label | the label must designate the invoice, in whole words, never through an empty value (`label.ts`) |
+| 6. Rewrites, no trace | only unmatched rows are touched, never rows marked `manual`; `match_source`, `matched_at` and `match_run_id` are recorded, and a run can be reverted by its id (query in the migration) |
+| 7. Time zone | `due_date` is a `date`, and the window is computed in SQL |
+| 8. Silent failures | one database transaction per run, rolled back on any error; statement and connection timeouts; exit code 1; validation errors name the transaction; orphan transactions are reported |
+| 9. Floats | amounts are `numeric(12,2)`, compared in SQL |
+| 10. Performance | one query per company |
+| Other points | parameterized queries; the SIREN is an argument (the old value stays the default) and is unique; rows are validated with Zod; `--dry-run`; unit tests, plus integration tests against Postgres (`npm run test:integration`), where every SQL rule was broken on purpose to check that a test fails |
+
+### What I deliberately left undone
+
+I only implemented exact, one-to-one matches. Anything that needs approximation or combination is left out, because each relaxation adds false positives, and a wrong match is worse than none: widening the date window, tolerating an amount gap (bank fees, exchange rates), partial payments, grouped payments, credit notes, fuzzy label matching.
+
+Also left out:
+- A foreign key on `transaction.account_id`: the seed holds an orphan transaction on purpose, and `db:reset` applies migrations before the seed. Orphans are counted and reported instead. In production, the key could be added `NOT VALID`, then validated after a cleanup.
+- A lock per company: the guarded write and the unique index are enough, as checked with two overlapping runs. If a user matches the same invoice to another transaction during a run, the unique index makes that run fail and roll back, and the next run goes through.
+- Deduplicating bank imports: the rework leaves both lines of a duplicated import contested and unmatched. The real fix is a unique index on `(account_id, remote_id)`, but it needs the existing duplicates resolved first and the ingestion to upsert, and here it would break `db:reset`, which loads the seed's duplicate after the migrations.
+- Running every company, and a screen to review ambiguous cases.
+- `CHECK` constraints on statuses: those tables belong to the ingestion side.
+
+### What I need from the product side
+
+Figures are on the seed, with the final rule.
+- **What does "Paid" mean?** If it means "settled elsewhere", matching it records a second payment. I kept it because the data points the other way: no Paid invoice is linked to a transaction, and the label often confirms them. It is still the riskiest assumption of the rework, and the seed plants the case (e0000008, an Adobe payment whose only candidate is a Paid invoice). Excluding Paid is a one-line change in `src/matching/rules.ts`, and drops matches from 322 to 224.
+- **Should "Pending" bank transactions be matched?** They are excluded for now, since they can still change. Including them would add up to 16 matches.
+- **Is the 3-day limit for late payments intended?** Accepting payments up to 30 days late would add 45 matches. And should an invoice number cited in the label override the window?
+- **Which currency?** No column says it. Two decimals assume euros.
+- **What about invoices without a due date?** There are 1,051 on the seed, and e0000006 has a label and an amount that fit perfectly. They are never matched for now. And should a match also set the invoice to Paid?
+- **What should happen to the 137 ambiguous transactions:** leave them for the user, or suggest the candidates?
+- **An agreement with the app team:** the app should write `match_source = 'manual'` when a user matches or undoes a match, so that the job never goes back on a human decision.
+
+### What I'd build next
+
+- A per-company alias table ("SLACK" → Slack Technologies, "OVH SAS" → OVHcloud), learned from the matches users make or confirm. It would recover the probably correct matches the strict rule misses (62 on the seed). AI could suggest aliases, or rank suggestions among candidates that already passed the rules, but never write a match on its own. Bank data also raises GDPR questions.
+- Suggestions for ambiguous cases, and the rate of matches undone by users as the measure of precision.
+- Running every company, triggered by ingestion rather than on a schedule; a stored `total` column with an index on `(company_id, total, due_date)`; `ANALYZE` after bulk imports.
+- A careful production rollout: re-check the matches the old job already wrote against the new rule, and list for human review those it would not have made (incoming payments, cancelled or deleted invoices, a supplier the label contradicts); fix the invoices the old job already linked to several transactions before creating the unique index (concurrently); check amounts above €131,072 before the type change; prefer expand/contract migrations on large tables.
+- Tooling: Testcontainers for CI, and pgtyped to generate types from the SQL.
+
+### How I used AI
+
+I used an AI assistant (Claude) throughout the exercise, as a pair.
+
+**For the analysis,** it read the code and replayed the job's logic on the seed to measure the problems. I checked the key figures by running the real job: 508 matches in Paris time, 506 in UTC, and 512 rows in the database after both runs. They matched.
+
+**The choices are mine,** discussed with it:
+- keeping "Paid" eligible given the data, and flagging it as a product question;
+- one function per rule at first, before moving the amount, date and eligibility rules to SQL;
+- moving candidate selection to SQL;
+- the rule "never touch a transaction marked manual";
+- keeping the default SIREN;
+- constants instead of magic numbers;
+- minimal Zod validation;
+- reorganizing the code before fixing it.
+
+**I wrote the code with it,** in small commits reviewed one by one. Each step was checked by comparing the matches before and after on the seed. For the integration tests, each SQL rule was broken on purpose to make sure a test fails.
+
+**Checking also corrected the AI.** It claimed that `NOT EXISTS` and `LEFT JOIN ... IS NULL` produced the same execution plan: measured, that was wrong, and I fixed the comment. Testing is also how the SQL query turned out to hang without statistics.
+
+### Time spent
+
+I worked on this on and off during the day, not in one sitting. The total working time is probably between 3 and 5 hours.
