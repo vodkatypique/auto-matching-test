@@ -8,7 +8,33 @@ import {
 } from "../db/queries";
 import { decideMatches } from "./decide";
 import { CANDIDATE_RULES } from "./rules";
-import type { Match } from "./types";
+import type { Match, MatchDecision } from "./types";
+
+export type RunOptions = {
+  dryRun?: boolean;
+};
+
+export type RunSummary = {
+  runId: string;
+  dryRun: boolean;
+  eligible: number;
+  decisions: Record<MatchDecision["outcome"], number>;
+  // In a dry run, how many would have been written.
+  written: number;
+  // Matched, or handled by a user, by someone else during the run.
+  changedMeanwhile: number;
+  withoutAccount: number;
+};
+
+function countByOutcome(
+  decisions: MatchDecision[],
+): RunSummary["decisions"] {
+  const counts = { matched: 0, no_candidate: 0, ambiguous: 0, contested: 0 };
+  for (const decision of decisions) {
+    counts[decision.outcome]++;
+  }
+  return counts;
+}
 
 // One database transaction per run: either every match of the run is
 // written, or none is. The run id is stored on each match, so that a bad run
@@ -16,7 +42,8 @@ import type { Match } from "./types";
 export async function runAutoMatching(
   pool: Pool,
   companySiren: string,
-): Promise<void> {
+  { dryRun = false }: RunOptions = {},
+): Promise<RunSummary> {
   const client = await pool.connect();
   // A connection that breaks while checked out emits "error": without a
   // listener, node-pg would crash the process. The failing query still
@@ -38,28 +65,27 @@ export async function runAutoMatching(
       company.id,
       CANDIDATE_RULES,
     );
-    const matches = decideMatches(transactions).filter(
+    const decisions = decideMatches(transactions);
+    const matches = decisions.filter(
       (decision): decision is Match => decision.outcome === "matched",
     );
 
     const runId = randomUUID();
     const written = await recordMatches(client, runId, matches);
     const withoutAccount = await countTransactionsWithoutAccount(client);
-    await client.query("commit");
+    // A dry run goes through exactly the same steps, writes included, so that
+    // its numbers are the real ones. Then it rolls everything back.
+    await client.query(dryRun ? "rollback" : "commit");
 
-    console.log(
-      `Matched ${written} of ${transactions.length} transactions (run ${runId})`,
-    );
-    if (written < matches.length) {
-      console.log(
-        `${matches.length - written} left as they were: matched by someone else during the run`,
-      );
-    }
-    if (withoutAccount > 0) {
-      console.warn(
-        `${withoutAccount} transaction(s) belong to no known account: no run can match them`,
-      );
-    }
+    return {
+      runId,
+      dryRun,
+      eligible: transactions.length,
+      decisions: countByOutcome(decisions),
+      written,
+      changedMeanwhile: matches.length - written,
+      withoutAccount,
+    };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw new Error(

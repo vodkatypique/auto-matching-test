@@ -2,15 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getMatchCandidates, recordMatches } from "../db/queries";
 import { CANDIDATE_RULES } from "./rules";
 import { runAutoMatching } from "./run";
@@ -35,9 +27,6 @@ const ACCOUNT = "ac000000-0000-4000-8000-000000000001";
 let db: Pool;
 
 beforeAll(async () => {
-  // runAutoMatching prints a summary: keep the test output readable.
-  vi.spyOn(console, "log").mockImplementation(() => {});
-
   const admin = new Pool({ ...connection, database: "postgres" });
   await admin.query(`drop database if exists ${TEST_DATABASE} with (force)`);
   await admin.query(`create database ${TEST_DATABASE}`);
@@ -317,13 +306,38 @@ describe("runAutoMatching", () => {
 
   it("reports transactions that belong to no known account", async () => {
     await insertTransaction({ account_id: randomUUID() });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await runAutoMatching(db, SIREN);
-    expect(warn).toHaveBeenCalledWith(
-      "1 transaction(s) belong to no known account: no run can match them",
-    );
-    warn.mockRestore();
+    const summary = await runAutoMatching(db, SIREN);
+    expect(summary.withoutAccount).toBe(1);
+  });
+
+  it("counts the decisions by reason", async () => {
+    await insertTransaction({ amount: "-120.00", label: "VIR ACME" });
+    await insertInvoice({ supplier_name: "Acme", tax_free_total: "100.00", vat_amount: "20.00" });
+    await insertTransaction({ amount: "-50.00", label: "VIR BETA" });
+    await insertInvoice({ supplier_name: "Beta", tax_free_total: "40.00", vat_amount: "10.00" });
+    await insertInvoice({ supplier_name: "Beta", tax_free_total: "40.00", vat_amount: "10.00" });
+    await insertTransaction({ amount: "-70.00", label: "VIR GAMMA" });
+    await insertTransaction({ amount: "-70.00", label: "VIR GAMMA" });
+    await insertInvoice({ supplier_name: "Gamma", tax_free_total: "60.00", vat_amount: "10.00" });
+    await insertTransaction({ amount: "-999.00", label: "VIR DELTA" });
+
+    const summary = await runAutoMatching(db, SIREN);
+    expect(summary).toMatchObject({
+      eligible: 5,
+      decisions: { matched: 1, ambiguous: 1, contested: 2, no_candidate: 1 },
+      written: 1,
+      changedMeanwhile: 0,
+    });
+  });
+
+  it("writes nothing in a dry run, but reports what it would write", async () => {
+    const payment = await insertTransaction();
+    await insertInvoice();
+
+    const summary = await runAutoMatching(db, SIREN, { dryRun: true });
+    expect(summary).toMatchObject({ dryRun: true, written: 1 });
+    expect(await matchedInvoiceOf(payment)).toBeNull();
   });
 
   it("rolls back and fails when the database blocks the run", async () => {
