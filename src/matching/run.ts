@@ -10,15 +10,13 @@ import { findMatch } from "./decide";
 export async function runAutoMatching(companySiren: string): Promise<void> {
   const company = await getCompanyBySiren(db, companySiren);
   const transactions = await getCompanyTransactions(db, company.id);
+  const invoices = await getCompanyInvoices(db, company.id);
 
   let matched = 0;
 
   for (const transaction of transactions) {
     try {
-      const invoice = findMatch(
-        transaction,
-        await getCompanyInvoices(db, company.id),
-      );
+      const invoice = findMatch(transaction, invoices);
       if (!invoice) {
         continue;
       }
