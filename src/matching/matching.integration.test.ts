@@ -23,6 +23,7 @@ const SIREN = "123456789";
 const COMPANY = "c0000000-0000-4000-8000-000000000001";
 const OTHER_COMPANY = "c0000000-0000-4000-8000-000000000002";
 const ACCOUNT = "ac000000-0000-4000-8000-000000000001";
+const OTHER_ACCOUNT = "ac000000-0000-4000-8000-000000000002";
 
 let db: Pool;
 
@@ -48,10 +49,10 @@ beforeEach(async () => {
     "insert into company (id, siren, name) values ($1, $2, 'Acme client'), ($3, '987654321', 'Other client')",
     [COMPANY, SIREN, OTHER_COMPANY],
   );
-  await db.query("insert into account (id, company_id) values ($1, $2)", [
-    ACCOUNT,
-    COMPANY,
-  ]);
+  await db.query(
+    "insert into account (id, company_id) values ($1, $2), ($3, $4)",
+    [ACCOUNT, COMPANY, OTHER_ACCOUNT, OTHER_COMPANY],
+  );
 });
 
 async function insertTransaction(fields: Record<string, unknown> = {}) {
@@ -156,13 +157,14 @@ describe("candidate selection (SQL)", () => {
     expect((await candidates()).get(payment)).toEqual([]);
   });
 
-  it("only considers booked, live, unmatched outgoing transactions", async () => {
+  it("only considers booked, live, unmatched outgoing transactions of the company", async () => {
     const eligible = await insertTransaction();
     const alreadyMatchedTo = await insertInvoice({ due_date: "2026-01-01" });
     await insertTransaction({ amount: "120.00" });
     await insertTransaction({ status: "Pending" });
     await insertTransaction({ deleted_at: "2026-06-11 10:00:00" });
     await insertTransaction({ matched_invoice_id: alreadyMatchedTo });
+    await insertTransaction({ account_id: OTHER_ACCOUNT });
 
     expect([...(await candidates()).keys()]).toEqual([eligible]);
   });
@@ -177,9 +179,16 @@ describe("candidate selection (SQL)", () => {
     await insertInvoice({ company_id: OTHER_COMPANY });
     const taken = await insertInvoice();
     await insertTransaction({ date: "2026-01-01", matched_invoice_id: taken });
+    // Only a live transaction takes an invoice: once deleted, it frees it.
+    const freedByDeletion = await insertInvoice();
+    await insertTransaction({
+      date: "2026-01-01",
+      matched_invoice_id: freedByDeletion,
+      deleted_at: "2026-06-01 10:00:00",
+    });
 
     expect((await candidates()).get(payment)).toEqual(
-      [toPay, pending, paid].sort(),
+      [toPay, pending, paid, freedByDeletion].sort(),
     );
   });
 });
@@ -287,6 +296,17 @@ describe("runAutoMatching", () => {
     ]);
     expect(written).toBe(0);
     expect(await matchedInvoiceOf(payment)).toBe(chosenByHand);
+  });
+
+  it("does not write to a transaction deleted between the read and the write", async () => {
+    const payment = await insertTransaction({ deleted_at: "2026-06-11 10:00:00" });
+    const invoice = await insertInvoice();
+
+    const written = await recordMatches(db, randomUUID(), [
+      { transactionId: payment, outcome: "matched", invoiceId: invoice },
+    ]);
+    expect(written).toBe(0);
+    expect(await matchedInvoiceOf(payment)).toBeNull();
   });
 
   it("refuses, in the database, one invoice for two live transactions", async () => {
