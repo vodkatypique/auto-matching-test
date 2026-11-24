@@ -13,6 +13,10 @@ async function reset() {
   await db.query('create schema public');
   await runSqlFiles(path.join(__dirname, '..', 'migrations'));
   await runSqlFiles(path.join(__dirname, '..', 'seeds'));
+  // Freshly loaded tables have no planner statistics: Postgres then assumes
+  // one row per table, picks nested loops, and the matching query runs for
+  // minutes instead of milliseconds.
+  await db.query('analyze');
   await db.end();
 }
 
