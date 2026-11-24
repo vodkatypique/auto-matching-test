@@ -29,8 +29,8 @@ export function findMatch(
   const candidates = invoices
     .filter(
       (invoice) =>
-        invoice.tax_free_total + invoice.vat_amount ===
-        Math.abs(transaction.amount),
+        invoice.tax_free_total_cents + invoice.vat_amount_cents ===
+        Math.abs(transaction.amount_cents),
     )
     .filter((invoice) => {
       const diff = dayDiff(transaction.date, invoice.due_date);

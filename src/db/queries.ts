@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import type { InvoiceRow, TransactionRow } from "../matching/types";
+import { numericToCents } from "./money";
 
 export type Db = Pick<Pool, "query">;
 
@@ -14,14 +15,17 @@ export async function getCompanyTransactions(
   db: Db,
   companyId: string,
 ): Promise<TransactionRow[]> {
-  const { rows } = await db.query<TransactionRow>(
+  const { rows } = await db.query(
     `select transaction.*
      from transaction
      join account on account.id = transaction.account_id
      where account.company_id = $1`,
     [companyId],
   );
-  return rows;
+  return rows.map(({ amount, ...row }) => ({
+    ...row,
+    amount_cents: numericToCents(amount),
+  }));
 }
 
 export async function getCompanyInvoices(
@@ -32,7 +36,11 @@ export async function getCompanyInvoices(
     "select * from buying_invoice where company_id = $1",
     [companyId],
   );
-  return rows;
+  return rows.map(({ tax_free_total, vat_amount, ...row }) => ({
+    ...row,
+    tax_free_total_cents: numericToCents(tax_free_total),
+    vat_amount_cents: numericToCents(vat_amount),
+  }));
 }
 
 export async function setMatchedInvoice(
