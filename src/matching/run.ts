@@ -1,5 +1,5 @@
-import { db } from "../db/pool";
 import {
+  type Db,
   getCompanyBySiren,
   getMatchCandidates,
   setMatchedInvoice,
@@ -7,7 +7,10 @@ import {
 import { decideMatches } from "./decide";
 import { CANDIDATE_RULES } from "./rules";
 
-export async function runAutoMatching(companySiren: string): Promise<void> {
+export async function runAutoMatching(
+  db: Db,
+  companySiren: string,
+): Promise<void> {
   const company = await getCompanyBySiren(db, companySiren);
   if (company === undefined) {
     throw new Error(`No company with SIREN ${companySiren}`);

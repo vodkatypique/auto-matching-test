@@ -2,7 +2,7 @@ import { db } from './src/db/pool';
 import { runAutoMatching } from './src/matching/run';
 
 async function main() {
-  await runAutoMatching('900997767');
+  await runAutoMatching(db, '900997767');
   await db.end();
 }
 
