@@ -1,6 +1,6 @@
 # FINDINGS : le job d'auto-matching
 
-> Brouillon en français. L'ordre est provisoire, je reclasse par gravité à la fin.
+> Brouillon en français, classé du plus grave au moins grave en production.
 
 ## Résumé
 
@@ -8,26 +8,15 @@ Le job ne respecte pas le principe posé par le README : quand aucun candidat n'
 
 Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine (le code est en utc mais la base depend du fuseau du serveur). Et chaque exécution réécrit celle d'avant, sans laisser de trace.
 
----
-
-## 0. Premier lancement : une erreur dans la console
-
-**Problème.** Chaque exécution affiche `skip TypeError: Cannot read properties of null (reading 'trim')`.
-- La transaction `e0000013-...-001` (-333,33€, "PRLV SEPA ASSURANCE") n'a qu'une facture candidate : 277,78+55,55, échéance le 18/01/2026.
-- Cette facture n'a pas de fournisseur (`supplier_name` est NULL), donc `normalizeLabel(null)` plante.
-- Le `catch` affiche "skip" suivi de l'erreur, puis le job continue.
-
-**Conséquence.** Cette erreur révèle deux problèmes :
-- Une donnée incomplète fait perdre un rapprochement qui était le seul possible. La même facture bloquerait toute autre transaction dont elle serait candidate.
-- L'erreur ne dit pas quelle transaction est concernée, j'ai du ajouter du code pour savoir d'ou ca venait, et le job se termine normalement. Personne ne saura qu'elle a été sautée.
+Classement : d'abord ce qui crée des écritures comptables fausses et invisibles, puis ce qui empêche de les corriger, puis ce qui rend le résultat non reproductible ou les pannes invisibles, puis les rapprochements manqués, et enfin le coût.
 
 ---
 
-## 4. Montant + date ne suffisent pas à prouver un paiement
+## 1. Le job devine quand plusieurs factures conviennent
 
-**Problème.** Le README demande un candidat "convaincant". Le code se contente du montant et de la fenêtre de dates. Le libellé bancaire (nom du fournisseur, numéro de facture) ne sert qu'à départager plusieurs candidats, via un malus dans le code. Il ne sert jamais à exiger une preuve ni à écarter un candidat.
+**Problème.** Quand plusieurs factures ont le bon montant dans la fenêtre, le code les classe et prend la première. En cas d'égalité, c'est l'ordre dans lequel la base renvoie les lignes qui décide.
 
-**Conséquence.** Des paiements sont imputés au mauvais fournisseur, alors que le libellé dit clairement qui a été payé. La facture choisie apparaît réglée et la vraie reste ouverte. Or les montants se répètent beaucoup : 35017 factures pour seulement 25702 totaux différents, et 153 factures Orange à 59,99€. Avoir le même montant ne prouve rien.
+**Conséquence.** Le README demande de laisser la transaction non rapprochée quand aucun candidat n'est convaincant, mais le job choisit quand même. Pour un abonnement, le paiement est imputé à l'échéance la plus proche, qui n'est pas forcément celle réellement payée, et la vraie facture reste ouverte. L'écriture a l'air plausible, donc personne ne la vérifiera.
 
 ---
 
@@ -47,49 +36,22 @@ Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine
 
 ---
 
-## 6. Chaque exécution réécrit tout, sans laisser de trace
+## 3. Une même facture rapprochée plusieurs fois
 
-**Problème.** Le job ne filtre pas les transactions déjà rapprochées et écrit sans condition. La base ne garde rien qui indique qui a rapproché (le job ou un utilisateur), ni quand, ni lors de quelle exécution. Et quand le job ne trouve plus de candidat, il ne touche à rien : un rapprochement devenu faux ou ambigu n'est jamais retiré.
-
-**Conséquence.**
-- Un rapprochement fait à la main par un utilisateur peut être écrasé.
-- Un rapprochement que l'utilisateur a défait est recréé à l'exécution suivante.
-- Après une mauvaise exécution (bug, mauvais déploiement), on ne peut pas lister ce qu'elle a écrit, donc on ne peut pas l'annuler sans toucher aux rapprochements manuels. D'après le README, ce code est déjà en production : rapprochements automatiques et manuels y sont donc déjà mélangés.
-
----
-
-## 8. Les montants en flottants font rater des rapprochements
-
-**Problème.** Les montants sont stockés en float et on fait des comparaison en JS avec ===, donc on a des soucis de representations classiques qui font que le resultat ne tombe pas exact très souvent.
-
-**Conséquence.** Des rapprochements évidents ne sont jamais faits, sans aucune erreur.
-
----
-
-## 9. Les échecs passent inaperçus
-
-**Problème.** Chaque transaction est traitée dans un try/catch qui affiche "skip" et l'erreur, sans identifiant, puis passe à la suivante et le process sort avec le code 0 dès lors que la société a été trouvée.
+**Problème.** Les factures déjà rapprochées ne sont pas exclues des candidats. Chaque transaction est traitée indépendamment, et rien en base n'empêche deux transactions de pointer vers la même facture.
 
 **Conséquence.**
-- Si la base redémarre ou devient injoignable pendant l'exécution, toutes les transactions restantes sont sautées en quelques millisecondes. Le job affiche "Matched N of 1200", se termine normalement, et le planificateur enregistre un succès.
-- Une requête bloquée peut aussi faire durer une exécution indéfiniment, jusqu'à chevaucher la suivante.
+- Une facture apparaît payée deux ou trois fois.
+- Quand un fournisseur est réellement payé deux fois de suite, le second paiement règle en fait une autre facture. 
+- Un débit en double, que le client devrait probablement contester a sa banque, apparaît comme réglé.
 
 ---
 
-## 7. Le résultat dépend du fuseau horaire de la machine
+## 4. Montant + date ne suffisent pas à prouver un paiement
 
-**Problème.** node-pg convertit une colonne `date` en objet `Date` à minuit, heure locale. `due_date`, lui, est un texte (`'YYYY-MM-DD'`) que `new Date()` interprète comme minuit UTC. `dayDiff` soustrait les deux.
+**Problème.** Le README demande un candidat "convaincant". Le code se contente du montant et de la fenêtre de dates. Le libellé bancaire (nom du fournisseur, numéro de facture) ne sert qu'à départager plusieurs candidats, via un malus dans le code. Il ne sert jamais à exiger une preuve ni à écarter un candidat.
 
-**Conséquence.** Sur une machine à l'heure de Paris, toutes les différences sont décalées d'un jour. Le même job, sur les mêmes données, produit donc des rapprochements différents selon le serveur.
-
-
----
-
-## 1. Le job devine quand plusieurs factures conviennent
-
-**Problème.** Quand plusieurs factures ont le bon montant dans la fenêtre, le code les classe et prend la première. En cas d'égalité, c'est l'ordre dans lequel la base renvoie les lignes qui décide.
-
-**Conséquence.** Le README demande de laisser la transaction non rapprochée quand aucun candidat n'est convaincant, mais le job choisit quand même. Pour un abonnement, le paiement est imputé à l'échéance la plus proche, qui n'est pas forcément celle réellement payée, et la vraie facture reste ouverte. L'écriture a l'air plausible, donc personne ne la vérifiera.
+**Conséquence.** Des paiements sont imputés au mauvais fournisseur, alors que le libellé dit clairement qui a été payé. La facture choisie apparaît réglée et la vraie reste ouverte. Or les montants se répètent beaucoup : 35017 factures pour seulement 25702 totaux différents, et 153 factures Orange à 59,99€. Avoir le même montant ne prouve rien.
 
 ---
 
@@ -105,14 +67,47 @@ Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine
 
 ---
 
-## 3. Une même facture rapprochée plusieurs fois
+## 6. Chaque exécution réécrit tout, sans laisser de trace
 
-**Problème.** Les factures déjà rapprochées ne sont pas exclues des candidats. Chaque transaction est traitée indépendamment, et rien en base n'empêche deux transactions de pointer vers la même facture.
+**Problème.** Le job ne filtre pas les transactions déjà rapprochées et écrit sans condition. La base ne garde rien qui indique qui a rapproché (le job ou un utilisateur), ni quand, ni lors de quelle exécution. Et quand le job ne trouve plus de candidat, il ne touche à rien : un rapprochement devenu faux ou ambigu n'est jamais retiré.
 
 **Conséquence.**
-- Une facture apparaît payée deux ou trois fois.
-- Quand un fournisseur est réellement payé deux fois de suite, le second paiement règle en fait une autre facture. 
-- Un débit en double, que le client devrait probablement contester a sa banque, apparaît comme réglé.
+- Un rapprochement fait à la main par un utilisateur peut être écrasé.
+- Un rapprochement que l'utilisateur a défait est recréé à l'exécution suivante.
+- Après une mauvaise exécution (bug, mauvais déploiement), on ne peut pas lister ce qu'elle a écrit, donc on ne peut pas l'annuler sans toucher aux rapprochements manuels. D'après le README, ce code est déjà en production : rapprochements automatiques et manuels y sont donc déjà mélangés.
+
+---
+
+## 7. Le résultat dépend du fuseau horaire de la machine
+
+**Problème.** node-pg convertit une colonne `date` en objet `Date` à minuit, heure locale. `due_date`, lui, est un texte (`'YYYY-MM-DD'`) que `new Date()` interprète comme minuit UTC. `dayDiff` soustrait les deux.
+
+**Conséquence.** Sur une machine à l'heure de Paris, toutes les différences sont décalées d'un jour. Le même job, sur les mêmes données, produit donc des rapprochements différents selon le serveur.
+
+---
+
+## 8. Les échecs passent inaperçus
+
+**Problème.** Chaque transaction est traitée dans un try/catch qui affiche "skip" et l'erreur, sans identifiant, puis passe à la suivante et le process sort avec le code 0 dès lors que la société a été trouvée.
+
+Exemple concret, visible dès le premier lancement : chaque exécution affiche `skip TypeError: Cannot read properties of null (reading 'trim')`.
+- La transaction `e0000013-...-001` (-333,33€, "PRLV SEPA ASSURANCE") n'a qu'une facture candidate : 277,78+55,55, échéance le 18/01/2026.
+- Cette facture n'a pas de fournisseur (`supplier_name` est NULL), donc `normalizeLabel(null)` plante.
+- Le `catch` affiche "skip" suivi de l'erreur, puis le job continue.
+
+**Conséquence.**
+- Une donnée incomplète fait perdre un rapprochement qui était le seul possible. La même facture bloquerait toute autre transaction dont elle serait candidate.
+- L'erreur ne dit pas quelle transaction est concernée, j'ai du ajouter du code pour savoir d'ou ca venait, et le job se termine normalement. Personne ne saura qu'elle a été sautée.
+- Si la base redémarre ou devient injoignable pendant l'exécution, toutes les transactions restantes sont sautées en quelques millisecondes. Le job affiche "Matched N of 1200", se termine normalement, et le planificateur enregistre un succès.
+- Une requête bloquée peut aussi faire durer une exécution indéfiniment, jusqu'à chevaucher la suivante.
+
+---
+
+## 9. Les montants en flottants font rater des rapprochements
+
+**Problème.** Les montants sont stockés en float et on fait des comparaison en JS avec ===, donc on a des soucis de representations classiques qui font que le resultat ne tombe pas exact très souvent.
+
+**Conséquence.** Des rapprochements évidents ne sont jamais faits, sans aucune erreur.
 
 ---
 
@@ -162,3 +157,9 @@ Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine
 **Pourquoi je garde la règle stricte.** Le README dit : un faux rapprochement est pire qu'une absence de rapprochement. Une transaction non rapprochée reste visible, et le client la traite à la main. Un faux rapprochement passe inaperçu. Or une règle plus souple, où un seul mot du nom suffirait, désigne à tort un autre fournisseur dans une vingtaine de libellés du seed : "PRO" trouve Free Pro dans "CB LEROY MERLIN PRO", "DUPONT" trouve Imprimerie Dupont dans l'encaissement "VIR RECU CLIENT DUPONT", "CABINET" confond trois cabinets différents.
 
 **Pour récupérer ces cas sans perdre en précision.** Il faudrait une table d'alias par société ("SLACK" → Slack Technologies), apprise à partir des rapprochements que l'utilisateur fait ou confirme à la main. Elle est déterministe et explicable, et l'IA pourrait proposer des alias qu'un humain valide.
+
+### Sans statistiques, la requête des candidats prend des minutes au lieu de millisecondes
+
+**Constat.** Une fois la sélection des candidats passée dans une seule requête SQL (jointure entre transactions et factures éligibles), le premier lancement juste après `db:reset` ne terminait pas : plus de 5 minutes. Juste après un chargement massif, les tables n'ont pas encore de statistiques. Postgres croit qu'elles n'ont qu'une ligne, choisit des boucles imbriquées, et recalcule l'anti-jointure ("facture déjà prise") pour chaque transaction. Après un `ANALYZE`, il choisit des jointures par hachage, et la même requête prend 35 ms.
+
+**Ce que j'ai fait.** `db:reset` lance `ANALYZE` après le seed. En production, les statistiques sont tenues à jour automatiquement, mais un gros import juste avant le job pourrait reproduire le problème. Le délai d'expiration de 30 s par requête le transforme alors en erreur visible (exécution annulée, code de sortie 1) au lieu d'un job bloqué. La vraie prévention serait de lancer `ANALYZE` à la fin des imports massifs.
