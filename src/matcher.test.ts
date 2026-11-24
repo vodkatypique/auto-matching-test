@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { dayDiff, normalizeLabel } from "./matcher";
+import { dayDiff } from "./matcher";
+import { normalizeLabel } from "./matching/label";
 
 describe("matcher", () => {
   it("normalizes labels", () => {

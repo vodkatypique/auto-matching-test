@@ -1,9 +1,6 @@
 import { db } from "./db/pool";
+import { normalizeLabel } from "./matching/label";
 import type { InvoiceRow, TransactionRow } from "./matching/types";
-
-export function normalizeLabel(value: string): string {
-  return value.trim().toLowerCase();
-}
 
 export function dayDiff(a: Date | string, b: Date | string): number {
   return Math.floor((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
