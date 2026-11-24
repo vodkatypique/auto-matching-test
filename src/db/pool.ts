@@ -1,9 +1,4 @@
-import { Pool, types } from 'pg';
-
-// Keep DATE columns as 'YYYY-MM-DD' strings. By default node-pg turns them
-// into a Date at local midnight, which made day differences depend on the
-// machine's time zone.
-types.setTypeParser(types.builtins.DATE, (value) => value);
+import { Pool } from 'pg';
 
 // A query stuck on a lock or a bad plan fails after this delay instead of
 // hanging: the run is then rolled back and the process exits with an error.
