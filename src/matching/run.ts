@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import {
+  countTransactionsWithoutAccount,
   getCompanyBySiren,
   getMatchCandidates,
   recordMatches,
@@ -17,6 +18,14 @@ export async function runAutoMatching(
   companySiren: string,
 ): Promise<void> {
   const client = await pool.connect();
+  // A connection that breaks while checked out emits "error": without a
+  // listener, node-pg would crash the process. The failing query still
+  // rejects, so the run is rolled back below.
+  const onConnectionError = (error: Error) => {
+    console.error("Database connection lost during the run:", error.message);
+  };
+  client.on("error", onConnectionError);
+
   try {
     await client.query("begin");
 
@@ -35,6 +44,7 @@ export async function runAutoMatching(
 
     const runId = randomUUID();
     const written = await recordMatches(client, runId, matches);
+    const withoutAccount = await countTransactionsWithoutAccount(client);
     await client.query("commit");
 
     console.log(
@@ -45,10 +55,19 @@ export async function runAutoMatching(
         `${matches.length - written} left as they were: matched by someone else during the run`,
       );
     }
+    if (withoutAccount > 0) {
+      console.warn(
+        `${withoutAccount} transaction(s) belong to no known account: no run can match them`,
+      );
+    }
   } catch (error) {
     await client.query("rollback").catch(() => {});
-    throw error;
+    throw new Error(
+      `Run for SIREN ${companySiren} rolled back, nothing was written: ${(error as Error).message}`,
+      { cause: error },
+    );
   } finally {
+    client.off("error", onConnectionError);
     client.release();
   }
 }

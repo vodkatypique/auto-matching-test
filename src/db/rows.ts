@@ -22,3 +22,19 @@ export const CandidateRow = z.object({
   invoice_number: z.nullable(z.string()),
 });
 export type CandidateRow = z.infer<typeof CandidateRow>;
+
+// Names the transaction in the error: a row index says nothing to whoever has
+// to fix the data.
+export function parseCandidateRow(row: Record<string, unknown>): CandidateRow {
+  const result = CandidateRow.safeParse(row);
+  if (!result.success) {
+    throw new Error(
+      `Unexpected data for transaction ${row.transaction_id}:\n${z.prettifyError(result.error)}`,
+    );
+  }
+  return result.data;
+}
+
+export const CountRow = z.object({
+  count: z.number(),
+});

@@ -68,6 +68,7 @@ beforeEach(async () => {
 async function insertTransaction(fields: Record<string, unknown> = {}) {
   const t = {
     id: randomUUID(),
+    account_id: ACCOUNT,
     amount: "-120.00",
     label: "VIR ACME",
     reference: null,
@@ -81,7 +82,7 @@ async function insertTransaction(fields: Record<string, unknown> = {}) {
     `insert into transaction
        (id, account_id, remote_id, amount, label, reference, status, date, matched_invoice_id, deleted_at)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [t.id, ACCOUNT, `BNK-${t.id}`, t.amount, t.label, t.reference, t.status, t.date, t.matched_invoice_id, t.deleted_at],
+    [t.id, t.account_id, `BNK-${t.id}`, t.amount, t.label, t.reference, t.status, t.date, t.matched_invoice_id, t.deleted_at],
   );
   return t.id;
 }
@@ -310,7 +311,42 @@ describe("runAutoMatching", () => {
 
   it("fails clearly for an unknown SIREN", async () => {
     await expect(runAutoMatching(db, "000000000")).rejects.toThrow(
-      "No company with SIREN 000000000",
+      "nothing was written: No company with SIREN 000000000",
     );
+  });
+
+  it("reports transactions that belong to no known account", async () => {
+    await insertTransaction({ account_id: randomUUID() });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await runAutoMatching(db, SIREN);
+    expect(warn).toHaveBeenCalledWith(
+      "1 transaction(s) belong to no known account: no run can match them",
+    );
+    warn.mockRestore();
+  });
+
+  it("rolls back and fails when the database blocks the run", async () => {
+    const payment = await insertTransaction();
+    await insertInvoice();
+    const impatient = new Pool({
+      ...connection,
+      database: TEST_DATABASE,
+      statement_timeout: 500,
+    });
+    const locker = await db.connect();
+    try {
+      await locker.query("begin");
+      await locker.query("lock table buying_invoice in access exclusive mode");
+
+      await expect(runAutoMatching(impatient, SIREN)).rejects.toThrow(
+        /nothing was written: canceling statement due to statement timeout/,
+      );
+    } finally {
+      await locker.query("rollback");
+      locker.release();
+      await impatient.end();
+    }
+    expect(await matchedInvoiceOf(payment)).toBeNull();
   });
 });

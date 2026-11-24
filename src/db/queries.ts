@@ -5,7 +5,7 @@ import type {
   Match,
   TransactionCandidates,
 } from "../matching/types";
-import { CandidateRow, CompanyRow } from "./rows";
+import { CompanyRow, CountRow, parseCandidateRow } from "./rows";
 
 export type Db = Pick<Pool, "query">;
 
@@ -79,7 +79,7 @@ export async function getMatchCandidates(
   );
 
   const byTransaction = new Map<string, TransactionCandidates>();
-  for (const row of z.array(CandidateRow).parse(rows)) {
+  for (const row of rows.map(parseCandidateRow)) {
     let entry = byTransaction.get(row.transaction_id);
     if (entry === undefined) {
       entry = {
@@ -101,6 +101,20 @@ export async function getMatchCandidates(
     }
   }
   return [...byTransaction.values()];
+}
+
+// Transactions whose account does not exist belong to no company: no run can
+// ever match them. There is no foreign key to prevent it, so they are counted
+// to be reported instead of disappearing silently.
+export async function countTransactionsWithoutAccount(db: Db): Promise<number> {
+  const { rows } = await db.query(
+    `select count(*)::int as count
+     from transaction
+     where not exists (
+       select 1 from account where account.id = transaction.account_id
+     )`,
+  );
+  return CountRow.parse(rows[0]).count;
 }
 
 // Writes all the matches of a run in one statement. The guards skip a

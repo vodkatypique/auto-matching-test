@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CandidateRow } from "./rows";
+import { CandidateRow, parseCandidateRow } from "./rows";
 
 describe("CandidateRow", () => {
   const row = {
@@ -19,5 +19,11 @@ describe("CandidateRow", () => {
     const { label: _label, ...withoutLabel } = row;
     expect(() => CandidateRow.parse(withoutLabel)).toThrow();
     expect(() => CandidateRow.parse({ ...row, label: null })).toThrow();
+  });
+
+  it("names the transaction and the column in the error", () => {
+    expect(() => parseCandidateRow({ ...row, label: null })).toThrow(
+      /transaction tx[\s\S]*label/,
+    );
   });
 });
