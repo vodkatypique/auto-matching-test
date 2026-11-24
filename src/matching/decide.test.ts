@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { dayDiff, findMatch } from "./decide";
-import { normalizeLabel } from "./label";
 import type { InvoiceRow, TransactionRow } from "./types";
 
 function invoiceDue(dueDate: string | null): InvoiceRow {
@@ -18,14 +17,11 @@ const paymentOnJune10: TransactionRow = {
   id: "tx",
   amount_cents: -12000,
   label: "VIR ACME",
+  reference: null,
   date: "2026-06-10",
 };
 
 describe("matcher", () => {
-  it("normalizes labels", () => {
-    expect(normalizeLabel(" SFR ")).toBe("sfr");
-  });
-
   it("computes the difference in days", () => {
     expect(dayDiff("2026-01-31", "2026-01-01")).toBe(30);
   });
@@ -59,6 +55,11 @@ describe("matcher", () => {
     expect(findMatch(credit, [invoiceDue("2026-06-10")])).toBeNull();
   });
 
+  it("never matches an invoice the label does not designate", () => {
+    const otherSupplier = { ...paymentOnJune10, label: "VIR DUPONT" };
+    expect(findMatch(otherSupplier, [invoiceDue("2026-06-10")])).toBeNull();
+  });
+
   it("matches an invoice whose total is exact in cents but not in floats", () => {
     const invoice = {
       id: "f0000003",
@@ -72,6 +73,7 @@ describe("matcher", () => {
       id: "e0000003",
       amount_cents: -61540,
       label: "VIR SEPA CABINET BERNARD CONSEIL",
+      reference: null,
       date: "2026-06-03",
     };
 

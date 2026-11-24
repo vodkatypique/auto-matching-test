@@ -6,13 +6,14 @@ export type TransactionRow = {
   id: string;
   amount_cents: number;
   label: string;
+  reference: string | null;
   date: string;
 };
 
 export type InvoiceRow = {
   id: string;
-  supplier_name: string;
-  invoice_number: string;
+  supplier_name: string | null;
+  invoice_number: string | null;
   tax_free_total_cents: number;
   vat_amount_cents: number;
   due_date: string | null;
