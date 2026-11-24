@@ -40,3 +40,5 @@ export type MatchDecision =
       transactionId: string;
       outcome: "no_candidate" | "ambiguous" | "contested";
     };
+
+export type Match = Extract<MatchDecision, { outcome: "matched" }>;

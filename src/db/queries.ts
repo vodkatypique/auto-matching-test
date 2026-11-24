@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import * as z from "zod/mini";
 import type {
   CandidateRules,
+  Match,
   TransactionCandidates,
 } from "../matching/types";
 import { CandidateRow, CompanyRow } from "./rows";
@@ -43,6 +44,10 @@ export async function getMatchCandidates(
          and transaction.status = $2
          and transaction.deleted_at is null
          and transaction.matched_invoice_id is null
+         -- Never touch a transaction a user worked on: once they undo a
+         -- match, it must not come back. "is distinct from" keeps the rows
+         -- where match_source is null, which "<>" would drop.
+         and transaction.match_source is distinct from 'manual'
      ),
      eligible_invoices as (
        select *
@@ -98,13 +103,30 @@ export async function getMatchCandidates(
   return [...byTransaction.values()];
 }
 
-export async function setMatchedInvoice(
+// Writes all the matches of a run in one statement. The guards skip a
+// transaction that someone matched, or that a user worked on, since it was
+// read, instead of overwriting their choice. Returns how many were written.
+export async function recordMatches(
   db: Db,
-  transactionId: string,
-  invoiceId: string,
-): Promise<void> {
-  await db.query(
-    "update transaction set matched_invoice_id = $1 where id = $2",
-    [invoiceId, transactionId],
+  runId: string,
+  matches: Match[],
+): Promise<number> {
+  const { rowCount } = await db.query(
+    `update transaction
+     set matched_invoice_id = m.invoice_id,
+         match_source = 'auto',
+         matched_at = now(),
+         match_run_id = $3
+     from unnest($1::uuid[], $2::uuid[]) as m(transaction_id, invoice_id)
+     where transaction.id = m.transaction_id
+       and transaction.matched_invoice_id is null
+       and transaction.match_source is distinct from 'manual'
+       and transaction.deleted_at is null`,
+    [
+      matches.map((match) => match.transactionId),
+      matches.map((match) => match.invoiceId),
+      runId,
+    ],
   );
+  return rowCount ?? 0;
 }

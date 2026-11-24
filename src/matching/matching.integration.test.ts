@@ -11,7 +11,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { getMatchCandidates } from "../db/queries";
+import { getMatchCandidates, recordMatches } from "../db/queries";
 import { CANDIDATE_RULES } from "./rules";
 import { runAutoMatching } from "./run";
 
@@ -225,6 +225,87 @@ describe("runAutoMatching", () => {
     await runAutoMatching(db, SIREN);
     expect(await matchedInvoiceOf(imported)).toBeNull();
     expect(await matchedInvoiceOf(importedTwice)).toBeNull();
+  });
+
+  it("records who matched, when and in which run, so a run can be reverted", async () => {
+    const payment = await insertTransaction();
+    const invoice = await insertInvoice();
+    const chosenByHand = await insertInvoice({ due_date: "2026-01-01" });
+    const matchedByHand = await insertTransaction({ date: "2026-01-01" });
+    await db.query(
+      "update transaction set matched_invoice_id = $1, match_source = 'manual' where id = $2",
+      [chosenByHand, matchedByHand],
+    );
+
+    await runAutoMatching(db, SIREN);
+    expect(await matchedInvoiceOf(payment)).toBe(invoice);
+    const {
+      rows: [match],
+    } = await db.query(
+      "select match_source, matched_at, match_run_id from transaction where id = $1",
+      [payment],
+    );
+    expect(match.match_source).toBe("auto");
+    expect(match.matched_at).toBeInstanceOf(Date);
+    expect(match.match_run_id).toMatch(/^[0-9a-f-]{36}$/);
+
+    // The revert query documented in the migration.
+    await db.query(
+      `update transaction
+       set matched_invoice_id = null, match_source = null,
+           matched_at = null, match_run_id = null
+       where match_run_id = $1 and match_source = 'auto'`,
+      [match.match_run_id],
+    );
+    expect(await matchedInvoiceOf(payment)).toBeNull();
+    expect(await matchedInvoiceOf(matchedByHand)).toBe(chosenByHand);
+  });
+
+  it("gives the same result when two runs overlap", async () => {
+    const payment = await insertTransaction();
+    const invoice = await insertInvoice();
+
+    await Promise.all([runAutoMatching(db, SIREN), runAutoMatching(db, SIREN)]);
+    expect(await matchedInvoiceOf(payment)).toBe(invoice);
+  });
+
+  it("never matches again a transaction whose match a user undid", async () => {
+    const undoneByUser = await insertTransaction();
+    await db.query(
+      "update transaction set match_source = 'manual' where id = $1",
+      [undoneByUser],
+    );
+    const invoice = await insertInvoice();
+
+    expect((await candidates()).has(undoneByUser)).toBe(false);
+    await runAutoMatching(db, SIREN);
+    expect(await matchedInvoiceOf(undoneByUser)).toBeNull();
+
+    const written = await recordMatches(db, randomUUID(), [
+      { transactionId: undoneByUser, outcome: "matched", invoiceId: invoice },
+    ]);
+    expect(written).toBe(0);
+  });
+
+  it("does not overwrite a transaction matched between the read and the write", async () => {
+    const chosenByHand = await insertInvoice();
+    const payment = await insertTransaction({ matched_invoice_id: chosenByHand });
+    const chosenByTheRun = await insertInvoice();
+
+    const written = await recordMatches(db, randomUUID(), [
+      { transactionId: payment, outcome: "matched", invoiceId: chosenByTheRun },
+    ]);
+    expect(written).toBe(0);
+    expect(await matchedInvoiceOf(payment)).toBe(chosenByHand);
+  });
+
+  it("refuses, in the database, one invoice for two live transactions", async () => {
+    const invoice = await insertInvoice();
+    await insertTransaction({ matched_invoice_id: invoice });
+
+    await expect(
+      insertTransaction({ matched_invoice_id: invoice }),
+    ).rejects.toThrow("transaction_matched_invoice_id_key");
   });
 
   it("fails clearly for an unknown SIREN", async () => {
