@@ -5,7 +5,7 @@ import {
   getEligibleTransactions,
   setMatchedInvoice,
 } from "../db/queries";
-import { findMatch } from "./decide";
+import { decideMatches } from "./decide";
 import {
   ELIGIBLE_INVOICE_STATUSES,
   ELIGIBLE_TRANSACTION_STATUS,
@@ -24,16 +24,16 @@ export async function runAutoMatching(companySiren: string): Promise<void> {
     ELIGIBLE_INVOICE_STATUSES,
   );
 
+  const decisions = decideMatches(transactions, invoices);
+
   let matched = 0;
 
-  for (const transaction of transactions) {
+  for (const decision of decisions) {
+    if (decision.outcome !== "matched") {
+      continue;
+    }
     try {
-      const invoice = findMatch(transaction, invoices);
-      if (!invoice) {
-        continue;
-      }
-
-      await setMatchedInvoice(db, transaction.id, invoice.id);
+      await setMatchedInvoice(db, decision.transactionId, decision.invoiceId);
       matched++;
     } catch (e) {
       console.log("skip", e);
