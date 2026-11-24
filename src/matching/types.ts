@@ -2,7 +2,7 @@ export type TransactionRow = {
   id: string;
   amount_cents: number;
   label: string;
-  date: Date;
+  date: string;
 };
 
 export type InvoiceRow = {
@@ -11,5 +11,9 @@ export type InvoiceRow = {
   invoice_number: string;
   tax_free_total_cents: number;
   vat_amount_cents: number;
-  due_date: string;
+  due_date: string | null;
 };
+
+// An invoice whose due date is known. Used as a type predicate when filtering
+// out invoices without one, so TypeScript knows due_date is a string after.
+export type InvoiceWithDueDate = InvoiceRow & { due_date: string };
