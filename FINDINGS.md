@@ -138,3 +138,17 @@ Deux défauts s'y ajoutent. Le résultat dépend du fuseau horaire de la machine
 - **Pas de dry-run.** aucun moyen de voir ce qu'une modification de la règle écrirait avant qu'elle n'écrive dans la comptabilité des clients.
 - **La logique de décision est mêlée aux accès à la base.** `findMatch` et `scoreCandidate` ne sont pas exportées, et le pool de connexions est global. On ne peut pas tester la décision sans base.
 - **Les tests ne vérifient rien de décisif, et rien ne vérifie les types.** Les tests couvrent deux petites fonctions utilitaires.
+
+## Trouvé pendant la refonte
+
+### Les gros montants ont peut-être déjà perdu leurs centimes
+
+**Problème.** Pour passer les montants en `numeric`, il faut convertir les valeurs `real` existantes. Deux pièges :
+- la conversion directe `real::numeric` ne garde que 6 chiffres significatifs : 12 345,67 devient 12 345,70 ;
+- plus grave, `real` ne garde qu'environ 7 chiffres significatifs dès l'enregistrement. Au-delà de 131 072 €, deux montants qui diffèrent d'un centime peuvent être stockés sous la même valeur.
+
+**Conséquence.** Si la base de production contient des montants au-delà de ce seuil, certains ont pu être enregistrés faux dès l'origine, sans aucune erreur. L'écart grandit avec le montant : au plus 1 centime jusqu'à 262 144 €, jusqu'à 3 centimes vers 1 M€, jusqu'à 50 centimes vers 10 M€. Aucune migration ne peut retrouver la valeur d'origine à partir de la base, et une comparaison exacte ne rapprochera jamais un montant faux d'un centime de sa facture.
+
+**Correction.**
+- La migration passe par `float8` puis arrondit au centime : `round(col::float8::numeric, 2)`. C'est exact tant que le `real` n'avait pas déjà perdu le centime.
+- Avant de migrer en production, compter les montants concernés (`abs(amount) >= 131072`, et de même pour les factures). S'il y en a, les corriger depuis la source : réimport du flux bancaire grâce à `remote_id`, nouvelle extraction de la facture d'origine.
